@@ -8,14 +8,16 @@ Download and extract UGREEN DH2300 firmware, including the kernel, device tree, 
 - [uv](https://docs.astral.sh/uv/)
 - `unsquashfs` for extracting firmware modules
 
-Install `unsquashfs` on Debian with:
+Install `unsquashfs` for your platform:
 
 ```sh
+# Debian
 sudo apt update
 sudo apt install squashfs-tools
-```
 
-On macOS, install it with `brew install squashfs`.
+# macOS
+brew install squashfs
+```
 
 On the DH2300, `/boot` is read-only by default. Remount it before writing firmware files:
 
