@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "ugreen-firmware-fetcher"
 version = "0.1.0"
 description = "Utility to scrape UGreen firmware download links"
-authors = [{name = "Your Name", email = "you@example.com"}]
+authors = [{name = "Enrico May", email = "sharkfox1720@gmail.com"}]
 requires-python = ">=3.9"
 dependencies = ["click>=8.1", "requests"]
 
