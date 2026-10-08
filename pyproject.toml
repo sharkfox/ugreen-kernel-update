@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ugreen-firmware-fetcher"
+version = "0.1.0"
+description = "Utility to scrape UGreen firmware download links"
+authors = [{name = "Your Name", email = "you@example.com"}]
+requires-python = ">=3.9"
+dependencies = ["click>=8.1", "requests"]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-cov>=6"]
+
+[project.scripts]
+ugreen-kernel-update = "ugreen_kernel_update:cli"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["fetch_firmware_links", "firmware_image", "ugreen_kernel_update"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.pylint.format]
+max-line-length = 120

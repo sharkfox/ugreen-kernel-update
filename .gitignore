@@ -1,0 +1,4 @@
+__pycache__
+uv.lock
+*.egg-info
+.github
