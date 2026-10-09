@@ -195,6 +195,8 @@ def check_firmware(cache_dir: Path) -> None:
         click.echo(f"Current package {current['version']} is the latest.")
         return
 
+    if not is_dh2300:
+        click.echo(f"Extracted package path: {boot_dir}")
     click.echo(f"Current package: {_package_label(current)}")
     click.echo(f"Latest package:  {_package_label(latest)}")
     if current["version"] != latest["version"]:
