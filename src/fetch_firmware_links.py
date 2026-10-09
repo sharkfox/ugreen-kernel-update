@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import Any, Final, TypedDict
 
 import requests
 
 API_BASE: Final = "https://api-eur.ugnas.com/api/system/v2/sa/official"
 MODEL_LIST_URL: Final = f"{API_BASE}/query/model?type=ugos-pro"
 MODEL_NAME: Final = "DH2300"
+
+
+class FirmwareRecord(TypedDict):
+    """Normalized release fields used by the CLI and kernel sidecar."""
+
+    model: str
+    version: str | None
+    date: str | None
+    url: str
 
 
 def get_json(session: requests.Session, url: str) -> dict[str, Any]:
@@ -36,13 +45,11 @@ def get_model_id(session: requests.Session, model_name: str) -> int:
             try:
                 return int(model["id"])
             except (KeyError, TypeError, ValueError) as error:
-                raise RuntimeError(
-                    f"UGREEN returned an invalid ID for {model_name}"
-                ) from error
+                raise RuntimeError(f"UGREEN returned an invalid ID for {model_name}") from error
     raise RuntimeError(f"UGREEN model not found: {model_name}")
 
 
-def fetch_links() -> list[dict[str, str | None]]:
+def fetch_links() -> list[FirmwareRecord]:
     """Fetch firmware download endpoints for the DH2300."""
     with requests.Session() as session:
         session.headers.update({"Accept-Language": "de-DE"})
@@ -54,13 +61,20 @@ def fetch_links() -> list[dict[str, str | None]]:
     if not isinstance(firmware_list, list):
         raise TypeError(f"UGREEN returned an invalid firmware list for {MODEL_NAME}")
 
-    return [
-        {
-            "model": MODEL_NAME,
-            "version": firmware.get("versionName"),
-            "date": firmware.get("pubDate"),
-            "url": firmware["otaUrl"],
-        }
-        for firmware in firmware_list
-        if isinstance(firmware, dict) and firmware.get("otaUrl")
-    ]
+    records: list[FirmwareRecord] = []
+    for firmware in firmware_list:
+        if not isinstance(firmware, dict):
+            continue
+        url = firmware.get("otaUrl")
+        if url is None or url == "":
+            continue
+        version = firmware.get("versionName")
+        date = firmware.get("pubDate")
+        if not isinstance(url, str):
+            raise TypeError("UGREEN returned an invalid firmware URL")
+        if version is not None and not isinstance(version, str):
+            raise TypeError("UGREEN returned an invalid firmware version")
+        if date is not None and not isinstance(date, str):
+            raise TypeError("UGREEN returned an invalid firmware publication date")
+        records.append({"model": MODEL_NAME, "version": version, "date": date, "url": url})
+    return records

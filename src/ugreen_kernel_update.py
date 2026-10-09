@@ -10,13 +10,14 @@ import re
 import subprocess
 import sys
 import tarfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
 
 import click
 import requests
 
-from fetch_firmware_links import API_BASE, fetch_links
+from fetch_firmware_links import API_BASE, FirmwareRecord, fetch_links
 from firmware_image import MODULES_PATH, extract_firmware_image
 
 DOWNLOAD_CHUNK_SIZE: Final = 1024 * 1024
@@ -26,7 +27,7 @@ CAPTCHA_IMAGE_URL: Final = f"{API_BASE}/captchaImage"
 ROOTFS_DIRECTORY: Final = Path("/")
 
 
-def _load_links() -> list[dict[str, str | None]]:
+def _load_links() -> list[FirmwareRecord]:
     """Fetch firmware records and translate API failures into CLI errors.
 
     Returns:
@@ -91,12 +92,25 @@ def extract_firmware(image_path: Path, output_dir: Path, write_rootfs: bool) -> 
     _extract_and_report(image_path, output_dir, write_rootfs)
 
 
-def _extract_and_report(image_path: Path, output_dir: Path, write_rootfs: bool = False) -> None:
+def _extract_and_report(
+    image_path: Path,
+    output_dir: Path,
+    write_rootfs: bool = False,
+    firmware: FirmwareRecord | None = None,
+) -> None:
     """Extract firmware artifacts, report metadata, and optionally write to `/`."""
     try:
         summary = extract_firmware_image(image_path, output_dir)
     except (FileExistsError, OSError, RuntimeError, tarfile.TarError) as error:
         raise click.ClickException(str(error)) from error
+    if firmware is not None:
+        metadata_path = output_dir / "boot" / "ug_kernel.json"
+        metadata = {**firmware, "kernel_version": summary.kernel_version}
+        try:
+            metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+        except OSError as error:
+            raise click.ClickException(f"Could not write kernel metadata to {metadata_path}: {error}") from error
     if write_rootfs:
         _copy_extracted_files_to_rootfs(output_dir)
     click.echo(f"Boot files extracted to {output_dir / 'boot'}")
@@ -145,6 +159,59 @@ def fetch_firmware_cli() -> None:
     click.echo(json.dumps(_load_links(), indent=2))
 
 
+@cli.command("check")
+@click.option(
+    "--cache-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=DEFAULT_CACHE_DIR,
+    show_default=True,
+    help="Directory containing the extracted kernel cache.",
+)
+def check_firmware(cache_dir: Path) -> None:
+    """Compare the locally installed or cached package with the latest release."""
+    uname_result = platform.uname()
+    is_dh2300 = "dh2300" in " ".join(uname_result).casefold()
+    boot_dir = ROOTFS_DIRECTORY / "boot" if is_dh2300 else cache_dir / "extracted" / "boot"
+    kernel_path = boot_dir / "ug_kernel"
+    metadata_path = boot_dir / "ug_kernel.json"
+    if not kernel_path.is_file() or not metadata_path.is_file():
+        location = "/boot" if is_dh2300 else str(boot_dir)
+        raise click.ClickException(f"No cached kernel and metadata found in {location}; nothing to check.")
+
+    try:
+        current = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise click.ClickException(f"Could not read kernel metadata from {metadata_path}: {error}") from error
+    if not isinstance(current, dict) or not isinstance(current.get("version"), str):
+        raise click.ClickException(f"Kernel metadata in {metadata_path} has no valid package version.")
+
+    links = _load_links()
+    latest = max(links, key=lambda item: item.get("date") or "")
+    if not isinstance(latest.get("version"), str):
+        raise click.ClickException("The latest firmware release has no valid package version.")
+    running_kernel = getattr(uname_result, "release", None) or uname_result[2]
+    kernel_matches = not is_dh2300 or current.get("kernel_version") == running_kernel
+    if current["version"] == latest["version"] and kernel_matches:
+        click.echo(f"Current package {current['version']} is the latest.")
+        return
+
+    click.echo(f"Current package: {_package_label(current)}")
+    click.echo(f"Latest package:  {_package_label(latest)}")
+    if current["version"] != latest["version"]:
+        click.echo("Update needed.")
+    if is_dh2300 and not kernel_matches:
+        expected_kernel = current.get("kernel_version") or "unknown"
+        click.echo(f"Running kernel: {running_kernel} (package kernel: {expected_kernel})")
+    raise click.exceptions.Exit(1)
+
+
+def _package_label(firmware: Mapping[str, Any]) -> str:
+    """Format the package version and publication date for check output."""
+    version = firmware.get("version") or "unknown version"
+    date = firmware.get("date") or "date unknown"
+    return f"{version} ({date})"
+
+
 @cli.command("update")
 @click.argument("version", required=False)
 @click.option(
@@ -184,6 +251,7 @@ def update_firmware(
         write_rootfs: Whether to copy extracted files into `/` on a DH2300.
     """
     links = _load_links()
+    firmware: FirmwareRecord | None
     if version is None:
         firmware = max(links, key=lambda item: item.get("date") or "")
     else:
@@ -199,7 +267,7 @@ def update_firmware(
     destination = _cache_path(firmware, cache_dir)
     if destination.is_file() and destination.stat().st_size > 0 and not force:
         click.echo(f"Using cached firmware at {destination}")
-        _extract_and_report(destination, cache_dir / "extracted", write_rootfs)
+        _extract_and_report(destination, cache_dir / "extracted", write_rootfs, firmware)
         return
     if not firmware["url"]:
         raise click.ClickException("The selected release has no download endpoint.")
@@ -217,10 +285,10 @@ def update_firmware(
         ValueError,
     ) as error:
         raise click.ClickException(str(error)) from error
-    _extract_and_report(destination, cache_dir / "extracted", write_rootfs)
+    _extract_and_report(destination, cache_dir / "extracted", write_rootfs, firmware)
 
 
-def _cache_path(firmware: dict[str, str | None], cache_dir: Path) -> Path:
+def _cache_path(firmware: FirmwareRecord, cache_dir: Path) -> Path:
     """Build the stable cache path for one model and firmware version.
 
     Args:

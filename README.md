@@ -44,9 +44,12 @@ Other commands:
 ```sh
 uv run ugreen-kernel-update list
 uv run ugreen-kernel-update list --json
+uv run ugreen-kernel-update check
 uv run ugreen-kernel-update update --dry-run
 uv run ugreen-kernel-update update [VERSION]
 uv run ugreen-kernel-update extract firmware.img --output-dir extracted
 ```
 
 Root filesystem writes are disabled by default. Add `--write-rootfs` to `extract` or `update` to copy the extracted boot files and modules to `/`. This option only runs on a DH2300 and uses `sudo` for the copy.
+
+`update` writes the firmware release fields and extracted kernel release to `boot/ug_kernel.json`. `check` fetches only the available release list and compares it with that metadata. On a DH2300 it checks `/boot` and verifies the running kernel release; on other systems it checks the cached `extracted/boot` directory. It does not download firmware, and returns a nonzero status when no local extracted kernel is available or when a newer package exists.

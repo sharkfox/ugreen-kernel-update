@@ -87,7 +87,7 @@ def runner() -> CliRunner:
 
 
 @pytest.fixture
-def firmware_record() -> dict[str, str | None]:
+def firmware_record() -> dict[str, Any]:
     """Return representative metadata for a downloadable release."""
     return {
         "model": "DH2300",
@@ -95,6 +95,11 @@ def firmware_record() -> dict[str, str | None]:
         "date": "2026-01-01",
         "url": "https://api.example.test/firmware",
     }
+
+
+def _kernel_metadata(firmware: dict[str, Any], kernel_version: str) -> dict[str, Any]:
+    """Return sidecar metadata using normalized package fields and kernel release."""
+    return {**firmware, "kernel_version": kernel_version}
 
 
 def test_list_command_supports_text_and_json(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,6 +151,97 @@ def test_list_command_reports_empty_catalog(runner: CliRunner, monkeypatch: pyte
 
     assert result.exit_code != 0
     assert "No firmware releases" in result.output
+
+
+def test_check_command_reports_matching_cached_package(
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    firmware_record: dict[str, str | None],
+) -> None:
+    """A matching cached package is reported without downloading firmware."""
+    boot_dir = tmp_path / "extracted" / "boot"
+    boot_dir.mkdir(parents=True)
+    (boot_dir / "ug_kernel").write_bytes(b"kernel")
+    (boot_dir / "ug_kernel.json").write_text(
+        json.dumps(_kernel_metadata(firmware_record, "6.1.115+")), encoding="utf-8"
+    )
+    monkeypatch.setattr(updater.platform, "uname", lambda: ("Linux", "workstation", "6.1", "#1", "x86_64", ""))
+    monkeypatch.setattr(updater, "fetch_links", lambda: [firmware_record])
+
+    result = runner.invoke(updater.cli, ["check", "--cache-dir", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "Current package 1.2.0 is the latest" in result.output
+
+
+def test_check_command_reports_package_mismatch(
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    firmware_record: dict[str, str | None],
+) -> None:
+    """An outdated package displays current and latest releases and exits nonzero."""
+    boot_dir = tmp_path / "extracted" / "boot"
+    boot_dir.mkdir(parents=True)
+    (boot_dir / "ug_kernel").write_bytes(b"kernel")
+    current = {**firmware_record, "version": "1.1.0", "date": "2025-12-01"}
+    latest = {**firmware_record, "version": "1.2.0", "date": "2026-01-01"}
+    (boot_dir / "ug_kernel.json").write_text(json.dumps(_kernel_metadata(current, "6.1.115+")), encoding="utf-8")
+    monkeypatch.setattr(updater.platform, "uname", lambda: ("Linux", "workstation", "6.1", "#1", "x86_64", ""))
+    monkeypatch.setattr(updater, "fetch_links", lambda: [current, latest])
+
+    result = runner.invoke(updater.cli, ["check", "--cache-dir", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "Current package: 1.1.0 (2025-12-01)" in result.output
+    assert "Latest package:  1.2.0 (2026-01-01)" in result.output
+    assert "Update needed." in result.output
+
+
+def test_check_command_uses_dh2300_boot_and_fails_without_local_kernel(
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    firmware_record: dict[str, str | None],
+) -> None:
+    """DH2300 checks use /boot and an absent kernel fails before a catalog request."""
+    rootfs_dir = tmp_path / "rootfs"
+    boot_dir = rootfs_dir / "boot"
+    boot_dir.mkdir(parents=True)
+    (boot_dir / "ug_kernel").write_bytes(b"kernel")
+    (boot_dir / "ug_kernel.json").write_text(
+        json.dumps(_kernel_metadata(firmware_record, "6.1.115+")), encoding="utf-8"
+    )
+    monkeypatch.setattr(updater, "ROOTFS_DIRECTORY", rootfs_dir)
+    monkeypatch.setattr(
+        updater.platform,
+        "uname",
+        lambda: ("Linux", "dh2300", "6.1.115+", "#1", "aarch64", ""),
+    )
+    monkeypatch.setattr(updater, "fetch_links", lambda: [firmware_record])
+
+    result = runner.invoke(updater.cli, ["check", "--cache-dir", str(tmp_path / "empty")])
+
+    assert result.exit_code == 0
+    assert "Current package 1.2.0 is the latest" in result.output
+
+    monkeypatch.setattr(updater.platform, "uname", lambda: ("Linux", "dh2300", "6.1", "#1", "aarch64", ""))
+    stale_kernel = runner.invoke(updater.cli, ["check", "--cache-dir", str(tmp_path / "empty")])
+    assert stale_kernel.exit_code == 1
+    assert "Running kernel: 6.1 (package kernel: 6.1.115+)" in stale_kernel.output
+
+    monkeypatch.setattr(updater, "ROOTFS_DIRECTORY", tmp_path / "missing-rootfs")
+    monkeypatch.setattr(updater, "fetch_links", lambda: pytest.fail("catalog must not be fetched"))
+    missing = runner.invoke(updater.cli, ["check", "--cache-dir", str(tmp_path / "empty")])
+
+    assert missing.exit_code != 0
+    assert "nothing to check" in missing.output
+
+    monkeypatch.setattr(updater.platform, "uname", lambda: ("Linux", "workstation", "6.1", "#1", "x86_64", ""))
+    empty_cache = runner.invoke(updater.cli, ["check", "--cache-dir", str(tmp_path / "empty")])
+    assert empty_cache.exit_code != 0
+    assert "nothing to check" in empty_cache.output
 
 
 def test_legacy_command_prints_json(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -368,6 +464,9 @@ def test_update_reuses_a_cached_image(
     assert (rootfs_dir / "boot/ug_kernel").read_bytes() == b"kernel"
     assert (rootfs_dir / updater.MODULES_PATH / "example.ko").read_bytes() == b"module"
     assert (rootfs_dir / updater.MODULES_PATH / "source").is_symlink()
+    assert json.loads((cache_dir / "extracted/boot/ug_kernel.json").read_text(encoding="utf-8")) == _kernel_metadata(
+        firmware_record, "6.1.115+"
+    )
     assert [command[1] for command in commands] == ["mkdir", "cp", "mkdir", "cp"]
 
 

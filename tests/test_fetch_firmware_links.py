@@ -88,6 +88,34 @@ def test_fetch_links_returns_only_downloadable_firmware(monkeypatch: pytest.Monk
 
 
 @pytest.mark.parametrize(
+    ("firmware", "message"),
+    [
+        ({"versionName": 12, "pubDate": "2026-01-01", "otaUrl": "https://example.test/fw"}, "invalid firmware version"),
+        (
+            {"versionName": "1.2.0", "pubDate": 2026, "otaUrl": "https://example.test/fw"},
+            "invalid firmware publication date",
+        ),
+        ({"versionName": "1.2.0", "pubDate": "2026-01-01", "otaUrl": 42}, "invalid firmware URL"),
+    ],
+)
+def test_fetch_links_rejects_invalid_record_field_types(
+    monkeypatch: pytest.MonkeyPatch,
+    firmware: dict[str, Any],
+    message: str,
+) -> None:
+    session = FakeSession(
+        [
+            FakeResponse({"code": 200, "data": {"modelDTOList": [{"id": 42, "model": "DH2300"}]}}),
+            FakeResponse({"code": 200, "data": [firmware]}),
+        ]
+    )
+    monkeypatch.setattr(firmware_links.requests, "Session", lambda: session)
+
+    with pytest.raises(TypeError, match=message):
+        firmware_links.fetch_links()
+
+
+@pytest.mark.parametrize(
     ("payload", "error_type", "message"),
     [
         ([], TypeError, "invalid response"),
