@@ -97,6 +97,7 @@ def _extract_and_report(
     output_dir: Path,
     write_rootfs: bool = False,
     firmware: FirmwareRecord | None = None,
+    reboot: bool = False,
 ) -> None:
     """Extract firmware artifacts, report metadata, and optionally write to `/`."""
     try:
@@ -111,6 +112,13 @@ def _extract_and_report(
             metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         except OSError as error:
             raise click.ClickException(f"Could not write kernel metadata to {metadata_path}: {error}") from error
+    reboot_required = (
+        reboot
+        and write_rootfs
+        and firmware is not None
+        and "dh2300" in " ".join(platform.uname()).casefold()
+        and _installed_firmware_version() != firmware["version"]
+    )
     if write_rootfs:
         _copy_extracted_files_to_rootfs(output_dir)
     click.echo(f"Boot files extracted to {output_dir / 'boot'}")
@@ -120,6 +128,43 @@ def _extract_and_report(
     click.echo(f"{summary.module_count} kernel modules extracted to {output_dir / MODULES_PATH}")
     if write_rootfs:
         click.echo(f"Extracted files copied to {ROOTFS_DIRECTORY}")
+    if reboot_required:
+        click.echo("Firmware version changed; rebooting DH2300.")
+        try:
+            subprocess.run(["sudo", "reboot"], check=True, capture_output=True, text=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            details = (
+                error.stderr.strip()
+                if isinstance(error, subprocess.CalledProcessError) and error.stderr
+                else str(error)
+            )
+            raise click.ClickException(f"Could not reboot DH2300: {details}") from error
+
+
+def _read_firmware_metadata(metadata_path: Path) -> dict[str, Any]:
+    """Read firmware metadata from a JSON sidecar file."""
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise click.ClickException(f"Could not read kernel metadata from {metadata_path}: {error}") from error
+    if not isinstance(metadata, dict):
+        raise click.ClickException(f"Kernel metadata in {metadata_path} has no valid package version.")
+    return metadata
+
+
+def _firmware_version(metadata: Mapping[str, Any]) -> str | None:
+    """Return the validated package version from firmware metadata."""
+    version = metadata.get("version")
+    return version if isinstance(version, str) else None
+
+
+def _installed_firmware_version() -> str | None:
+    """Read the currently installed firmware version from rootfs metadata."""
+    try:
+        metadata = _read_firmware_metadata(ROOTFS_DIRECTORY / "boot" / "ug_kernel.json")
+    except click.ClickException:
+        return None
+    return _firmware_version(metadata)
 
 
 def _copy_extracted_files_to_rootfs(output_dir: Path) -> None:
@@ -191,11 +236,9 @@ def check_firmware(cache_dir: Path) -> None:
         location = "/boot" if is_dh2300 else str(boot_dir)
         raise click.ClickException(f"No cached kernel and metadata found in {location}; nothing to check.")
 
-    try:
-        current = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise click.ClickException(f"Could not read kernel metadata from {metadata_path}: {error}") from error
-    if not isinstance(current, dict) or not isinstance(current.get("version"), str):
+    current = _read_firmware_metadata(metadata_path)
+    current_version = _firmware_version(current)
+    if current_version is None:
         raise click.ClickException(f"Kernel metadata in {metadata_path} has no valid package version.")
 
     links = _load_links()
@@ -204,15 +247,15 @@ def check_firmware(cache_dir: Path) -> None:
         raise click.ClickException("The latest firmware release has no valid package version.")
     running_kernel = getattr(uname_result, "release", None) or uname_result[2]
     kernel_matches = not is_dh2300 or current.get("kernel_version") == running_kernel
-    if current["version"] == latest["version"] and kernel_matches:
-        click.echo(f"Current package {current['version']} is the latest.")
+    if current_version == latest["version"] and kernel_matches:
+        click.echo(f"Current package {current_version} is the latest.")
         return
 
     if not is_dh2300:
         click.echo(f"Extracted package path: {boot_dir}")
     click.echo(f"Current package: {_package_label(current)}")
     click.echo(f"Latest package:  {_package_label(latest)}")
-    if current["version"] != latest["version"]:
+    if current_version != latest["version"]:
         click.echo("Update needed.")
     if is_dh2300 and not kernel_matches:
         expected_kernel = current.get("kernel_version") or "unknown"
@@ -249,12 +292,20 @@ def _package_label(firmware: Mapping[str, Any]) -> str:
     is_flag=True,
     help="Copy extracted files into / on a DH2300 target. Disabled by default.",
 )
+@click.option(
+    "--reboot",
+    is_flag=True,
+    help="Reboot after writing a different firmware version to a DH2300.",
+)
+# Click maps each update option to a callback argument.
+# pylint: disable=too-many-arguments,too-many-positional-arguments
 def update_firmware(
     version: str | None,
     cache_dir: Path,
     force: bool,
     dry_run: bool,
     write_rootfs: bool,
+    reboot: bool,
 ) -> None:
     """Download a release and optionally copy extracted files into the target rootfs.
 
@@ -264,6 +315,7 @@ def update_firmware(
         force: Whether to replace an existing cached image.
         dry_run: Whether to display the selected release without downloading it.
         write_rootfs: Whether to copy extracted files into `/` on a DH2300.
+        reboot: Whether to reboot after writing a different firmware version.
     """
     links = _load_links()
     firmware: FirmwareRecord | None
@@ -282,7 +334,7 @@ def update_firmware(
     destination = _cache_path(firmware, cache_dir)
     if destination.is_file() and destination.stat().st_size > 0 and not force:
         click.echo(f"Using cached firmware at {destination}")
-        _extract_and_report(destination, cache_dir / "extracted", write_rootfs, firmware)
+        _extract_and_report(destination, cache_dir / "extracted", write_rootfs, firmware, reboot)
         return
     if not firmware["url"]:
         raise click.ClickException("The selected release has no download endpoint.")
@@ -300,7 +352,7 @@ def update_firmware(
         ValueError,
     ) as error:
         raise click.ClickException(str(error)) from error
-    _extract_and_report(destination, cache_dir / "extracted", write_rootfs, firmware)
+    _extract_and_report(destination, cache_dir / "extracted", write_rootfs, firmware, reboot)
 
 
 def _cache_path(firmware: FirmwareRecord, cache_dir: Path) -> Path:

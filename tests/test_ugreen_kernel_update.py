@@ -28,6 +28,8 @@ def _mock_sudo_copy(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         if command[1] == "mount":
             assert command[2:] == ["-o", "remount,rw", "/boot"]
             return subprocess.CompletedProcess(command, 0, "", "")
+        if command[1] == "reboot":
+            return subprocess.CompletedProcess(command, 0, "", "")
         if command[1] == "mkdir":
             return native_run(["mkdir", *command[2:]], **kwargs)
         assert command[1] == "cp"
@@ -506,6 +508,51 @@ def test_update_reuses_a_cached_image(
         firmware_record, "6.1.115+"
     )
     assert [command[1] for command in commands] == ["mount", "mkdir", "cp", "mkdir", "cp"]
+
+
+@pytest.mark.parametrize(
+    ("installed_version", "expected_reboot"),
+    [("1.1.0", True), ("1.2.0", False), (None, True)],
+)
+def test_update_reboots_only_when_written_firmware_version_differs(
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    firmware_record: dict[str, str | None],
+    installed_version: str | None,
+    expected_reboot: bool,
+) -> None:
+    """The reboot option reboots after rootfs writes only when versions differ."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    rootfs_dir = tmp_path / "rootfs"
+    boot_dir = rootfs_dir / "boot"
+    boot_dir.mkdir(parents=True)
+    if installed_version is not None:
+        (boot_dir / "ug_kernel.json").write_text(json.dumps({"version": installed_version}), encoding="utf-8")
+    monkeypatch.setattr(updater, "ROOTFS_DIRECTORY", rootfs_dir)
+    monkeypatch.setattr(updater.platform, "uname", lambda: ("Linux", "dh2300", "6.1.115+", "#1", "aarch64", ""))
+    monkeypatch.setattr(updater, "fetch_links", lambda: [firmware_record])
+    cached_image = cache_dir / "ugreen-DH2300-1.2.0.img"
+    cached_image.write_bytes(b"cached image")
+
+    def extract_image(_: Path, destination: Path) -> firmware_image.ExtractionSummary:
+        (destination / "boot").mkdir(parents=True)
+        (destination / updater.MODULES_PATH).mkdir(parents=True)
+        return firmware_image.ExtractionSummary(0, "6.1.115+", "kernel-md5", "dtb-md5")
+
+    monkeypatch.setattr(updater, "extract_firmware_image", extract_image)
+    commands = _mock_sudo_copy(monkeypatch)
+
+    result = runner.invoke(
+        updater.cli,
+        ["update", "--write-rootfs", "--reboot", "--cache-dir", str(cache_dir)],
+    )
+
+    assert result.exit_code == 0
+    assert ("reboot" in [command[1] for command in commands]) is expected_reboot
+    if expected_reboot:
+        assert commands[-1] == ["sudo", "reboot"]
 
 
 def test_update_requires_a_download_url(
