@@ -31,10 +31,12 @@ def _mock_sudo_copy(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         if command[1] == "reboot":
             return subprocess.CompletedProcess(command, 0, "", "")
         if command[1] == "mkdir":
-            return native_run(["mkdir", *command[2:]], **kwargs)
+            check = kwargs.pop("check", True)
+            return native_run(["mkdir", *command[2:]], check=check, **kwargs)
         assert command[1] == "cp"
         assert command[2:5] == ["-R", "-P", "--"]
-        return native_run(["cp", *command[2:]], **kwargs)
+        check = kwargs.pop("check", True)
+        return native_run(["cp", *command[2:]], check=check, **kwargs)
 
     monkeypatch.setattr(updater.subprocess, "run", copy_with_native_cp)
     return commands

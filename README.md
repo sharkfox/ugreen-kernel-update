@@ -29,6 +29,13 @@ Install the project environment:
 
 ```sh
 uv sync
+uv run pre-commit install
+```
+
+Pre-commit runs pylint on `src` and `tests`, Ruff, and the full pytest suite when Python files change. To run the hooks manually:
+
+```sh
+uv run pre-commit run --all-files
 ```
 
 ## Usage
