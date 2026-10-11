@@ -136,6 +136,19 @@ def _copy_extracted_files_to_rootfs(output_dir: Path) -> None:
         raise click.ClickException("--write-rootfs is only available on a DH2300 target.")
 
     try:
+        subprocess.run(
+            ["sudo", "mount", "-o", "remount,rw", "/boot"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        details = (
+            error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+        )
+        raise click.ClickException(f"Could not remount /boot read-write: {details}") from error
+
+    try:
         for relative_path in (Path("boot"), Path(MODULES_PATH)):
             source = output_dir / relative_path
             destination = ROOTFS_DIRECTORY / relative_path

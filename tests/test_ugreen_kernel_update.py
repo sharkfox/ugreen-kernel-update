@@ -25,6 +25,9 @@ def _mock_sudo_copy(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     def copy_with_native_cp(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         commands.append(command)
         assert command[0] == "sudo"
+        if command[1] == "mount":
+            assert command[2:] == ["-o", "remount,rw", "/boot"]
+            return subprocess.CompletedProcess(command, 0, "", "")
         if command[1] == "mkdir":
             return native_run(["mkdir", *command[2:]], **kwargs)
         assert command[1] == "cp"
@@ -316,7 +319,7 @@ def test_extract_command_writes_to_rootfs_only_on_dh2300(
     assert (rootfs_dir / updater.MODULES_PATH / "6.1.115+" / "example.ko").read_bytes() == b"module"
     assert (rootfs_dir / updater.MODULES_PATH / "6.1.115+" / "build").is_symlink()
     assert f"Extracted files copied to {rootfs_dir}" in result.output
-    assert [command[1] for command in commands] == ["mkdir", "cp", "mkdir", "cp"]
+    assert [command[1] for command in commands] == ["mount", "mkdir", "cp", "mkdir", "cp"]
 
 
 def test_extract_command_rejects_rootfs_write_on_non_target(
@@ -359,7 +362,9 @@ def test_extract_command_reports_rootfs_copy_failure(
         lambda *_: firmware_image.ExtractionSummary(0, "6.1.115+", "kernel-md5", "dtb-md5"),
     )
 
-    def fail_copy(command: list[str], **_: object) -> None:
+    def fail_copy(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if command[1] == "mount":
+            return subprocess.CompletedProcess(command, 0, "", "")
         raise subprocess.CalledProcessError(1, command, stderr="read-only root filesystem")
 
     monkeypatch.setattr(updater.subprocess, "run", fail_copy)
@@ -369,6 +374,39 @@ def test_extract_command_reports_rootfs_copy_failure(
     assert result.exit_code != 0
     assert "Could not copy extracted files" in result.output
     assert "read-only root filesystem" in result.output
+
+
+def test_extract_command_stops_when_boot_remount_fails(
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed /boot remount prevents any writes to the target rootfs."""
+    image_path = tmp_path / "firmware.img"
+    image_path.write_bytes(b"image")
+    rootfs_dir = tmp_path / "rootfs"
+    monkeypatch.setattr(updater, "ROOTFS_DIRECTORY", rootfs_dir)
+    monkeypatch.setattr(updater.platform, "uname", lambda: ("Linux", "dh2300", "6.1.115+", "#1", "aarch64", ""))
+    monkeypatch.setattr(
+        updater,
+        "extract_firmware_image",
+        lambda *_: firmware_image.ExtractionSummary(0, "6.1.115+", "kernel-md5", "dtb-md5"),
+    )
+    commands: list[list[str]] = []
+
+    def fail_remount(command: list[str], **_: object) -> None:
+        commands.append(command)
+        raise subprocess.CalledProcessError(1, command, stderr="permission denied")
+
+    monkeypatch.setattr(updater.subprocess, "run", fail_remount)
+
+    result = runner.invoke(updater.cli, ["extract", str(image_path), "--write-rootfs"])
+
+    assert result.exit_code != 0
+    assert "Could not remount /boot read-write" in result.output
+    assert "permission denied" in result.output
+    assert commands == [["sudo", "mount", "-o", "remount,rw", "/boot"]]
+    assert not rootfs_dir.exists()
 
 
 def test_extract_command_translates_extraction_errors(
@@ -467,7 +505,7 @@ def test_update_reuses_a_cached_image(
     assert json.loads((cache_dir / "extracted/boot/ug_kernel.json").read_text(encoding="utf-8")) == _kernel_metadata(
         firmware_record, "6.1.115+"
     )
-    assert [command[1] for command in commands] == ["mkdir", "cp", "mkdir", "cp"]
+    assert [command[1] for command in commands] == ["mount", "mkdir", "cp", "mkdir", "cp"]
 
 
 def test_update_requires_a_download_url(

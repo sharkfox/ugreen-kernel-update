@@ -19,7 +19,7 @@ sudo apt install squashfs-tools
 brew install squashfs
 ```
 
-On the DH2300, `/boot` is read-only by default. Remount it before writing firmware files:
+On the DH2300, `/boot` is read-only by default. The `--write-rootfs` option remounts it read-write with `sudo` before copying firmware files.
 
 ```sh
 sudo mount -o remount,rw /boot
@@ -50,6 +50,6 @@ uv run ugreen-kernel-update update [VERSION]
 uv run ugreen-kernel-update extract firmware.img --output-dir extracted
 ```
 
-Root filesystem writes are disabled by default. Add `--write-rootfs` to `extract` or `update` to copy the extracted boot files and modules to `/`. This option only runs on a DH2300 and uses `sudo` for the copy.
+Root filesystem writes are disabled by default. Add `--write-rootfs` to `extract` or `update` to remount `/boot` read-write and copy the extracted boot files and modules to `/`. This option only runs on a DH2300 and uses `sudo` for the remount and copy.
 
 `update` writes the firmware release fields and extracted kernel release to `boot/ug_kernel.json`. `check` fetches only the available release list and compares it with that metadata. On a DH2300 it checks `/boot` and verifies the running kernel release; on other systems it checks the cached `extracted/boot` directory. It does not download firmware, and returns a nonzero status when no local extracted kernel is available or when a newer package exists.
